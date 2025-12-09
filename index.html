@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>差旅費核銷系統 (V34 書籤自動填入版)</title>
+    <title>差旅費核銷系統 (V36 雜費邏輯修正版)</title>
     <style>
         body { font-family: "Microsoft JhengHei", Arial, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; }
         .container { max-width: 1800px; margin: 0 auto; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
@@ -61,7 +61,7 @@
 <body>
 
 <div class="container">
-    <h2>差旅費核銷系統 (V34 書籤自動填入版)</h2>
+    <h2>差旅費核銷系統 (V36 雜費邏輯修正版)</h2>
 
     <div class="section sec-import">
         <h3 style="margin:0 0 10px 0; color:#27ae60;">步驟 1：匯入差勤資料</h3>
@@ -78,7 +78,7 @@
                     <th width="6%">時數</th>
                     <th width="8%">車種</th>
                     <th width="12%">事由 (錨點)</th>
-                    <th width="20%">Google Maps 詳細文字<br><span style="font-size:0.7em; font-weight:normal; color:#bdc3c7;">(頭尾直算/去重)</span></th>
+                    <th width="20%">Google Maps 詳細文字<br><span style="font-size:0.7em; font-weight:normal; color:#bdc3c7;">(V20 頭尾直算邏輯)</span></th>
                     <th width="8%">設定</th>
                     <th width="18%">產出文字</th>
                     <th width="6%">車資</th>
@@ -94,10 +94,9 @@
         <h3 style="margin:0 0 10px 0; color:#d35400;">步驟 4：產生神填書籤 (混合定位)</h3>
         <div style="font-size:0.95em; color:#333; margin-bottom:10px; line-height:1.6;">
             <b>使用說明：</b><br>
-            1. 將下方的 <b>[⚡ V34 自動填入]</b> 按鈕拖曳到您的瀏覽器書籤列。<br>
-            2. 回到差勤系統，點開所有申請按鈕。<br>
-            3. 點擊書籤，並依畫面指示操作。<br>
-            <span style="color:#e74c3c;">* 系統將優先使用內容比對，若比對失敗則使用順序補位，確保資料 100% 填入。</span>
+            1. 將下方的 <b>[⚡ V36 雙軌神填]</b> 按鈕拖曳到您的書籤列。<br>
+            2. 回到差勤系統，務必點開所有行程的 [申請] 按鈕。<br>
+            3. 點擊書籤，系統會依據 [內容比對] + [順序補位] 自動填寫。<br>
         </div>
         <div id="bookmarkletContainer" style="text-align:center; padding:20px;">
             </div>
@@ -113,7 +112,7 @@
 <script>
     let tripData = [];
 
-    // --- 解析與計算邏輯 (V22) ---
+    // --- 解析與計算邏輯 ---
     function parseImport() {
         const text = document.getElementById('importText').value;
         const tbody = document.getElementById('tripBody');
@@ -194,6 +193,7 @@
     function processMapText(id, text) { const trip = tripData.find(t => t.id === id); if(trip) { trip.gmapText = text; recalculateSingleTrip(trip); calculateAll(); } }
 
     function recalculateSingleTrip(trip) {
+        // V20 頭尾直算邏輯
         const regex = /\(([\d.]+)\s*(公里|公尺)\)/g;
         let matches = []; let match;
         const text = trip.gmapText;
@@ -263,16 +263,29 @@
     function calculateAll() {
         const totalTrans = tripData.reduce((sum, t) => sum + t.transportFee, 0);
         document.getElementById('sumTrans').innerText = totalTrans;
+        
         let dailyStats = {};
+        
+        // 1. 群組當日行程
         tripData.forEach(trip => {
-            if (!dailyStats[trip.date]) dailyStats[trip.date] = { totalHours: 0, maxOneWay: 0, trips: [], limit: 0 };
+            if (!dailyStats[trip.date]) { 
+                dailyStats[trip.date] = { totalHours: 0, maxOneWay: 0, trips: [] }; 
+            }
             const day = dailyStats[trip.date];
             day.totalHours += getDuration(trip.start, trip.end);
-            if (trip.oneWayKm > day.maxOneWay) day.maxOneWay = trip.oneWayKm;
+            
+            // 找出該日所有行程中，單程距離最長的一筆
+            if (trip.oneWayKm > day.maxOneWay) {
+                day.maxOneWay = trip.oneWayKm;
+            }
             day.trips.push(trip);
         });
+
         let grandTotalMisc = 0;
+
+        // 2. 判定當日上限與平帳
         Object.values(dailyStats).forEach(day => {
+            // V36: 上限完全依據「當日最長里程」與「當日總時數」決定
             let limit = 0;
             if (day.maxOneWay >= 5) {
                 const isDayLong = day.totalHours > 4;
@@ -280,38 +293,60 @@
                 else if (day.maxOneWay < 60) limit = isDayLong ? 300 : 150;
                 else limit = isDayLong ? 400 : 200;
             }
-            day.limit = limit; grandTotalMisc += limit;
+            day.limit = limit;
+            grandTotalMisc += limit;
+
+            // 計算試算總和
             let currentSum = day.trips.reduce((s, t) => s + t.singleTripMisc, 0);
             let excess = currentSum - limit;
+            
+            // 初始化最終雜費為單趟試算值
             day.trips.forEach(t => t.finalMisc = t.singleTripMisc);
+
+            // 若總和超過上限，進行扣減
             if (excess > 0) {
                 let candidates = day.trips.filter(t => t.singleTripMisc > 0);
                 if (candidates.length > 0) {
-                    let victim = candidates[candidates.length - 1];
-                    if (victim.finalMisc >= excess) victim.finalMisc -= excess;
-                    else {
-                        let remainingExcess = excess;
-                        for (let i = candidates.length - 1; i >= 0; i--) {
-                            let t = candidates[i];
-                            if (remainingExcess <= 0) break;
-                            let deduct = Math.min(t.finalMisc, remainingExcess);
-                            t.finalMisc -= deduct; remainingExcess -= deduct;
-                        }
+                    let remainingExcess = excess;
+                    // 從最後一筆往回扣
+                    for (let i = candidates.length - 1; i >= 0; i--) {
+                        let t = candidates[i];
+                        if (remainingExcess <= 0) break;
+                        let deduct = Math.min(t.finalMisc, remainingExcess);
+                        t.finalMisc -= deduct; 
+                        remainingExcess -= deduct;
                     }
                 }
             }
         });
+
+        // 3. 更新 UI
         tripData.forEach(trip => {
             const day = dailyStats[trip.date];
             const tr = document.getElementById(trip.id);
             document.getElementById(`trans-${trip.id}`).innerText = `$${trip.transportFee}`;
             const miscCell = document.getElementById(`misc-${trip.id}`);
             miscCell.innerText = `$${trip.finalMisc}`;
-            if (trip.finalMisc !== trip.singleTripMisc) { miscCell.classList.add('fee-adjusted'); miscCell.title = "已自動扣減"; }
-            else { miscCell.classList.remove('fee-adjusted'); miscCell.title = "點擊複製"; }
-            if (day.trips.length > 1) tr.classList.add('warning-bg'); else tr.classList.remove('warning-bg');
-            document.getElementById(`limit-${trip.id}`).innerHTML = `<div class="daily-limit-box"><div>總時:${day.totalHours.toFixed(1)}hr</div><div>最遠:${day.maxOneWay.toFixed(1)}km</div><div style="border-top:1px solid #ddd;font-weight:bold;color:#d35400;">日上限:$${day.limit}</div></div>`;
+            
+            if (trip.finalMisc !== trip.singleTripMisc) { 
+                miscCell.classList.add('fee-adjusted'); 
+                miscCell.title = `原始試算: $${trip.singleTripMisc} (已自動扣減)`; 
+            } else { 
+                miscCell.classList.remove('fee-adjusted'); 
+                miscCell.title = "點擊複製"; 
+            }
+            
+            if (day.trips.length > 1) tr.classList.add('warning-bg'); 
+            else tr.classList.remove('warning-bg');
+            
+            document.getElementById(`limit-${trip.id}`).innerHTML = 
+                `<div class="daily-limit-box">
+                    <div>總時:${day.totalHours.toFixed(1)}hr</div>
+                    <div>最遠:${day.maxOneWay.toFixed(1)}km</div>
+                    <div style="border-top:1px solid #ddd;font-weight:bold;color:#d35400;">日上限:$${day.limit}</div>
+                </div>`;
         });
+        
         document.getElementById('sumMisc').innerText = grandTotalMisc;
         document.getElementById('sumGrand').innerText = totalTrans + grandTotalMisc;
         
@@ -347,7 +382,7 @@
         fontFamily: 'Arial', textAlign: 'center'
     });
     
-    box.innerHTML = '<h3 style="margin:0 0 10px 0; color:#2c3e50;">⚡ V34 自動填入系統</h3><p style="font-size:12px; color:#555; text-align:left;">1. 請將所有行程的 [申請] 按鈕點開。<br>2. 點擊下方按鈕。<br>3. 系統將使用 [內容比對] + [順序補位] 確保 100% 填寫。</p>';
+    box.innerHTML = '<h3 style="margin:0 0 10px 0; color:#2c3e50;">⚡ V36 雙軌神填</h3><p style="font-size:12px; color:#555; text-align:left;">1. 請將所有行程的 [申請] 按鈕點開。<br>2. 點擊下方按鈕。<br>3. 系統將使用 [內容比對] + [順序補位] 確保 100% 填寫。</p>';
 
     const btnBatch = document.createElement('button');
     btnBatch.innerText = '⚡ 執行填寫 (Hybrid Mode)';
@@ -375,7 +410,6 @@
         let matchedRows = new Set(); 
 
         // 1. 取得所有可見的資料列
-        // 假設有輸入框的 TR 才是資料列
         const allRows = Array.from(document.querySelectorAll('tr')).filter(tr => {
             return tr.style.display !== 'none' && tr.querySelector('input[type="text"], textarea');
         });
@@ -384,13 +418,11 @@
             let targetRow = null;
             let anchorIndex = -1;
 
-            // --- 策略 A: 內容比對 (Content Match) ---
+            // --- 策略 A: 內容比對 ---
             for (let tr of allRows) {
-                if (matchedRows.has(tr)) continue; // 跳過已填過的
+                if (matchedRows.has(tr)) continue; 
 
                 const inputs = Array.from(tr.querySelectorAll('input[type="text"], textarea'));
-                
-                // 尋找內容包含事由的輸入框
                 const foundInput = inputs.find(el => {
                     const val = normalize(el.value);
                     const reason = normalize(item.reason);
@@ -406,22 +438,14 @@
                 }
             }
 
-            // --- 策略 B: 順序補位 (Index Fallback) ---
-            // 如果內容比對失敗 (例如第一筆)，則直接拿「第 index 筆」未使用的資料列
+            // --- 策略 B: 順序補位 ---
             if (!targetRow) {
-                // 找出還沒被使用的第一列
                 const availableRow = allRows.find(tr => !matchedRows.has(tr));
                 if (availableRow) {
                     targetRow = availableRow;
-                    // 由於沒有錨點，我們假設事由欄位的位置
-                    // 通常 WebITR 的事由是倒數第 2 或第 3 個輸入框，這裡我們嘗試用「倒推法」
-                    // 或者更安全的：重新搜尋該列的輸入框，通常事由是最長的那個，或是特定位置
-                    // 這裡採用 V32 的假設：事由在右側，費用在左側。
-                    // 為了安全，我們假設結構固定：
-                    // 我們需要找到 "事由" 所在的 TD index，才能往左推。
-                    // 這裡我們嘗試找該列中 "value 不為空" 的最後一個文字框當作事由錨點
+                    // 使用假設的錨點 (倒數第二個輸入框)
                     const inputs = Array.from(targetRow.querySelectorAll('input[type="text"], textarea'));
-                    const candidate = inputs[inputs.length - 1]; // 假設事由在後面
+                    const candidate = inputs[inputs.length - 1]; 
                     if(candidate) {
                         const tds = Array.from(targetRow.children);
                         anchorIndex = tds.indexOf(candidate.closest('td'));
@@ -431,12 +455,10 @@
 
             // --- 執行填寫 ---
             if (targetRow && anchorIndex !== -1) {
-                matchedRows.add(targetRow); // 標記為已使用
-                
+                matchedRows.add(targetRow); 
                 const tds = Array.from(targetRow.children);
                 
                 // 相對位置 (WebITR 常見結構)
-                // Anchor(事由) -> 左1(備註) -> 左3(雜費) -> 左5(機車) -> 左6(汽車)
                 const noteTd = tds[anchorIndex - 1];
                 const miscTd = tds[anchorIndex - 3];
                 const scooterTd = tds[anchorIndex - 5];
@@ -444,12 +466,11 @@
 
                 if (noteTd) fillInput(noteTd, item.note);
                 if (miscTd) fillInput(miscTd, item.miscFee);
+                
                 if (scooterTd) fillInput(scooterTd, item.scooterFee);
                 if (carTd) fillInput(carTd, item.carFee);
 
                 successCount++;
-                
-                // 視覺回饋: 標記該列已被處理
                 targetRow.style.borderLeft = "5px solid #2c3e50";
             }
         });
@@ -475,7 +496,7 @@
 
         const container = document.getElementById('bookmarkletContainer');
         container.style.display = 'block';
-        container.innerHTML = `<a href="${encodeURI(scriptCode)}" class="bookmarklet-btn" title="拖曳我到書籤列">⚡ V34 自動填入 (拖曳到書籤列)</a>`;
+        container.innerHTML = `<a href="${encodeURI(scriptCode)}" class="bookmarklet-btn" title="拖曳我到書籤列">⚡ V36 雙軌神填 (拖曳到書籤列)</a>`;
     }
 </script>
 
